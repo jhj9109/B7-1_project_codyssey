@@ -8,6 +8,9 @@
     2. 챗봇 화면에서 질문을 입력하면, AI가 맥락을 이해하고 응답을 반환한다.
     3. 과거의 대화 기록이 자동으로 저장되어 재로그인 시에도 확인 가능하다.
     4. AI 서버 지연 시 사용자에게 친절한 안내 메시지를 제공한다.
+*   **비로그인 제한의 보안적·정책적 근거**:
+    *   **개인정보 및 대화 프라이버시 보호**: 사용자별 대화 로그를 엄격히 분리·보호하기 위해 인증된 사용자만 대화 세션에 접근하도록 제한합니다.
+    *   **AI API 자원 고갈 및 어뷰징 방지**: 무분별한 비인가 요청으로 인한 외부 LLM API(Gemini) 호출 비용 폭증 및 서비스 거부(DoS) 공격을 사전에 차단합니다.
 
 ## 2. 시스템 구조
 *   **아키텍처**: 프론트엔드/백엔드 분리형 아키텍처 (Next.js + FastAPI + SQLite)
@@ -17,24 +20,191 @@
     *   **Database (SQLite + SQLAlchemy)**: 사용자 정보 및 채팅 로그(질문, 응답, 에러 상태, 시간) 영구 저장.
     *   **AI Service (Gemini API)**: `google-generativeai` 라이브러리를 사용해 프롬프트 및 컨텍스트를 기반으로 답변 생성.
 
+### 아키텍처 다이어그램 (Mermaid)
+
+```mermaid
+flowchart TD
+    subgraph Client ["Client (Frontend)"]
+        UI["Next.js (App Router / React)"]
+        TokenStore["In-Memory Access Token"]
+        CookieStore["HttpOnly Refresh Cookie"]
+    end
+
+    subgraph Server ["Server (FastAPI Backend)"]
+        Main["main.py (App & Middleware)"]
+        
+        subgraph Routers ["Router Layer"]
+            AuthRouter["auth/router.py"]
+            ChatRouter["ai_chat/router.py"]
+        end
+        
+        subgraph Services ["Service Layer"]
+            AuthService["auth/service.py"]
+            ChatService["ai_chat/service.py"]
+            Security["auth/security.py (JWT/Bcrypt)"]
+        end
+        
+        subgraph Repositories ["Repository Layer"]
+            AuthRepo["auth/repository.py"]
+            ChatRepo["ai_chat/repository.py"]
+        end
+        
+        subgraph Core ["Core Layer"]
+            Config["core/config.py"]
+            DB["core/database.py"]
+            Models["core/models.py"]
+            Schemas["core/schemas.py"]
+        end
+    end
+
+    subgraph Storage ["Storage & External"]
+        SQLite[("SQLite (chatbot.db)")]
+        Gemini[("Google Gemini API (2.5-flash)")]
+    end
+
+    UI <-->|"HTTP REST / Bearer Token"| Main
+    CookieStore <-->|"HttpOnly Cookie"| Main
+    Main --> AuthRouter
+    Main --> ChatRouter
+    AuthRouter --> AuthService
+    ChatRouter --> ChatService
+    AuthService --> Security
+    AuthService --> AuthRepo
+    ChatService --> Gemini
+    ChatService --> ChatRepo
+    AuthRepo --> DB
+    ChatRepo --> DB
+    DB --> SQLite
+```
+
+### 파일 수준 구성요소 역할 및 디렉토리 책임 범위
+
+| 모듈 / 디렉토리 | 파일 경로 | 주요 역할 및 책임 범위 | 담당 엔드포인트 |
+|---|---|---|---|
+| **Entrypoint** | `main.py` | FastAPI 앱 인스턴스 생성, CORS 미들웨어 등록, 라우터 통합, DB 테이블 자동 생성 | `GET /` |
+| **Core** | `core/config.py` | Pydantic `BaseSettings` 기반 환경변수(`.env`) 중앙 관리 및 검증 | - |
+| | `core/database.py` | SQLAlchemy 엔진 생성, 세션 팩토리(`SessionLocal`) 및 `get_db` 의존성 제공 | - |
+| | `core/models.py` | 데이터베이스 ORM 테이블 모델 정의 (`User`, `ChatLog`) | - |
+| | `core/schemas.py` | Pydantic v2 데이터 검증 모델 (`UserCreate`, `Token`, `ChatRequest`, `ChatResponse`) | - |
+| **Auth** | `auth/router.py` | 인증 HTTP 엔드포인트 라우팅 및 쿠키 세팅 | `POST /api/auth/signup`<br>`POST /api/auth/login`<br>`POST /api/auth/refresh`<br>`POST /api/auth/logout` |
+| | `auth/service.py` | 회원가입 중복 검사, 패스워드 해싱, JWT 토큰 발급/검증 비즈니스 로직 | - |
+| | `auth/repository.py` | User 테이블 CRUD 쿼리 추상화 (`get_user_by_username`, `create_user`) | - |
+| | `auth/security.py` | bcrypt 비밀번호 해싱/검증, JWT 발급, `get_current_user` 인증 의존성 | - |
+| | `auth/validators.py` | 아이디(3~50자, 영문/숫자) 및 비밀번호(8자 이상, 영문+숫자) 검증 로직 | - |
+| **AI Chat** | `ai_chat/router.py` | 채팅 HTTP 요청 수신, 의존성 주입(`get_current_user`, `get_db`), Service 위임 | `POST /api/chat`<br>`GET /api/me/chats` |
+| | `ai_chat/service.py` | 대화 맥락(최근 3턴) 조립, 비동기 AI 통신(`asyncio.to_thread`), 타임아웃 및 대체 응답 처리 | - |
+| | `ai_chat/repository.py` | 질문 선저장(1차), 응답/에러 후저장(2차), 대화 내역 조회 CRUD 전담 | - |
+
+### 3계층 아키텍처 (Router - Service - Repository) 원칙
+1. **Router 계층**: HTTP 요청 수신, 파라미터 유효성 검사, 의존성 주입(`Depends`), HTTP 상태 코드 및 응답 변환만 담당합니다.
+2. **Service 계층**: 비즈니스 흐름 제어, AI 통신, 비밀번호 암호화 등 핵심 도메인 로직을 수행합니다.
+3. **Repository 계층**: SQLAlchemy 세션을 주입받아 순수 데이터베이스 쿼리와 트랜잭션(`add`, `commit`, `refresh`)만을 전담하여 데이터 접근을 추상화합니다.
+
 ## 3. API 명세
 
-### 인증 API
-*   `POST /api/auth/register`: 회원가입
-    *   요청: `{"username": "user1", "password": "password123"}`
-    *   응답: `{"id": 1, "username": "user1", "created_at": "..."}`
-*   `POST /api/auth/login`: 로그인 (JWT 발급)
-    *   요청: Form Data `username=user1&password=password123`
-    *   응답: `{"access_token": "eyJ...", "token_type": "bearer"}`
+### 3.1 엔드포인트 접근 권한 요약
 
-### 챗봇 API
+| 엔드포인트 | 메서드 | 접근 권한 | 설명 |
+|---|---|---|---|
+| `/api/auth/signup` (`/register`) | `POST` | **공개 (Public)** | 신규 회원가입 |
+| `/api/auth/login` | `POST` | **공개 (Public)** | 로그인 및 JWT 토큰/쿠키 발급 |
+| `/api/auth/refresh` | `POST` | **공개 (쿠키 검증)** | Refresh Token 쿠키를 통한 토큰 재발급 |
+| `/api/auth/logout` | `POST` | **공개 (쿠키 만료)** | 로그아웃 및 세션 쿠키 제거 |
+| `/api/chat` | `POST` | **인증 필요 (Bearer JWT)** | AI 질문 전송 및 답변 생성 |
+| `/api/me/chats` | `GET` | **인증 필요 (Bearer JWT)** | 현재 로그인된 사용자의 전체 대화 기록 조회 |
+
+### 3.2 인증 API
+*   `POST /api/auth/signup` (또는 `/register`): 회원가입
+    *   요청: `{"username": "user1", "password": "password123"}`
+    *   성공 응답 (`201 Created`): `{"id": 1, "username": "user1", "created_at": "..."}`
+    *   실패 응답 - 아이디 중복 (`409 Conflict`):
+        ```json
+        {
+          "detail": "Username already registered"
+        }
+        ```
+    *   실패 응답 - 유효성 검사 실패 (`422 Unprocessable Entity`):
+        ```json
+        {
+          "detail": "비밀번호는 최소 8자 이상이어야 합니다."
+        }
+        ```
+*   `POST /api/auth/login`: 로그인 (JWT 발급)
+    *   요청 (JSON): `{"username": "user1", "password": "password123"}` (Content-Type: application/json)
+    *   성공 응답 (`200 OK`):
+        ```json
+        {
+          "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+          "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+          "token_type": "bearer"
+        }
+        ```
+    *   실패 응답 - 비밀번호/아이디 불일치 (`401 Unauthorized`):
+        ```json
+        {
+          "detail": "Incorrect username or password"
+        }
+        ```
+
+### 3.3 챗봇 API
 *   `POST /api/chat`: AI 질문 전송 (Requires Bearer Token)
     *   요청: `{"message": "안녕, 넌 누구니?"}`
-    *   응답: `{"id": 1, "user_message": "안녕, 넌 누구니?", "ai_response": "저는 AI 어시스턴트입니다.", "error_status": null, "created_at": "..."}`
+    *   성공 응답 (`200 OK`): `{"id": 1, "user_message": "안녕, 넌 누구니?", "ai_response": "저는 AI 어시스턴트입니다.", "error_status": null, "created_at": "..."}`
+    *   AI 지연/오류 시 대체 응답 (`200 OK`):
+        ```json
+        {
+          "id": 2,
+          "user_message": "안녕, 넌 누구니?",
+          "ai_response": "현재 응답이 지연되고 있어요. 잠시 후 다시 시도해 주세요. (error: AI_TIMEOUT)",
+          "error_status": "AI_TIMEOUT",
+          "created_at": "..."
+        }
+        ```
 *   `GET /api/me/chats`: 내 대화 내역 조회 (Requires Bearer Token)
     *   응답: `[{"id": 1, "user_message": "...", "ai_response": "...", ...}]`
 
+### 3.4 비로그인 공통 인증 실패 응답 (`401 Unauthorized`)
+인증 헤더(`Authorization: Bearer <token>`)가 없거나 토큰이 유효하지 않은 상태로 보호된 엔드포인트(`/api/chat`, `/api/me/chats`)를 호출할 경우 일관되게 `401` 상태 코드와 한글 안내 메시지를 반환합니다:
+```json
+{
+  "detail": "로그인이 필요합니다."
+}
+```
+
+### 3.5 입력값 검증 규칙 및 스키마 관리 정책
+*   **입력 검증 규칙 (Pydantic & 프론트엔드 동일 적용)**:
+    *   `username`: 3~50자, 영문자/숫자/언더스코어(`_`)만 허용.
+    *   `password`: 최소 8자 이상, 영문자와 숫자 각각 1개 이상 필수 포함.
+    *   `message`: 1자 이상 1,000자 이하 (`min_length=1, max_length=1000`).
+*   **스키마 버전 및 호환성 관리 정책**:
+    *   하위 호환성(Backward Compatibility) 유지를 위해 기존 필드는 임의로 삭제하거나 이름을 변경하지 않습니다.
+    *   새로운 필드 추가 시 `Optional` 타입과 기본값(`None`)을 지정하여 기존 클라이언트가 중단 없이 동작하도록 보장합니다.
+    *   RESTful 설계 원칙에 따라 명사형 리소스 경로(`/api/chat`, `/api/me/chats`)를 표준화하여 사용합니다.
+
 ## 4. DB 구조 (ERD / 테이블)
+
+### 4.1 ERD 다이어그램 (Mermaid)
+
+```mermaid
+erDiagram
+    USERS ||--o{ CHAT_LOGS : "writes"
+    USERS {
+        int id PK "Auto Increment"
+        string username UK "Unique, Not Null"
+        string hashed_password "Not Null"
+        datetime created_at "Default NOW"
+    }
+    CHAT_LOGS {
+        int id PK "Auto Increment"
+        int user_id FK "References USERS.id"
+        text user_message "Not Null"
+        text ai_response "Nullable"
+        string error_status "Nullable (AI_TIMEOUT 등)"
+        datetime created_at "Default NOW"
+    }
+```
+
+### 4.2 테이블 스키마 상세
 
 **Users 테이블 (`users`)**
 | 필드명 | 타입 | 설명 | 제약조건 |
@@ -53,6 +223,13 @@
 | ai_response | Text | AI 응답 내용 | Nullable |
 | error_status | String | 에러 상태 코드 | Nullable (예: "AI_TIMEOUT") |
 | created_at | DateTime | 채팅 일시 | 자동 생성 |
+
+### 4.3 스키마 마이그레이션 정책
+*   **초기 테이블 생성**: 애플리케이션 시작 시 `main.py`의 `Base.metadata.create_all(bind=engine)`을 통해 정의된 모든 테이블이 자동으로 생성됩니다.
+*   **운영 스키마 마이그레이션 절차 (Alembic 도입 표준)**:
+    1. 마이그레이션 환경 초기화: `alembic init migrations`
+    2. 모델 변경 사항 자동 감지 및 리비전 생성: `alembic revision --autogenerate -m "add_columns_to_chat_logs"`
+    3. 데이터베이스에 변경 사항 적용: `alembic upgrade head`
 
 ## 5. 배포 / 실행 방법
 
@@ -75,7 +252,9 @@ source venv/bin/activate  # Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
 
 # 3. 환경 변수 세팅
-# 루트 폴더에 .env 파일을 생성하고 GEMINI_API_KEY 등을 입력합니다.
+# 루트 폴더에 .env.example을 복사하여 .env 파일을 생성하고 GEMINI_API_KEY 등을 입력합니다.
+cp .env.example .env
+nano .env
 
 # 4. FastAPI 서버 실행 (포트 8000)
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -134,7 +313,41 @@ nohup npm start &
 # 브라우저에서 http://[EC2퍼블릭IP]:3000 접속
 ```
 
-## 6. 팀 구성원 역할 및 개인별 작업 요약 (커밋 시나리오)
+## 6. 핵심 설계 원칙 및 운영 정책
+
+### 6.1 세션 기반 vs JWT 토큰 기반 인증 선택 근거
+*   **선택 방식**: **JWT 토큰 기반 인증** (In-Memory Access Token + HttpOnly Refresh Cookie)
+*   **선택 근거**:
+    1.  **무상태성(Stateless)과 수평 확장성**: Next.js 프론트엔드와 FastAPI 백엔드가 분리된 MSA형 구조에서, 백엔드 서버 인스턴스가 늘어나더라도 별도의 중앙 세션 스토리지(Redis 등) 클러스터링 비용 없이 안정적으로 토큰을 검증할 수 있습니다.
+    2.  **보안 극대화 (XSS 및 CSRF 방어)**:
+        *   탈취 위험이 높은 브라우저 로컬 저장소(`localStorage`) 대신 **자바스크립트 탭 메모리 변수**에만 Access Token을 유지하여 XSS(Cross-Site Scripting) 공격을 원천 차단합니다.
+        *   Refresh Token은 자바스크립트 코드가 접근할 수 없는 **`HttpOnly`, `SameSite=Lax` 쿠키**로 발행하여 CSRF 공격 및 토큰 탈취를 방지합니다.
+    3.  **FastAPI Depends 의존성 재사용**: `get_current_user` 의존성을 통해 모든 보호된 엔드포인트에서 일관된 토큰 검증 및 유저 주입을 수행합니다.
+
+### 6.2 AI 보안 원칙
+*   Google Gemini API Key는 클라이언트 코드(HTML/JS)에 일절 노출되지 않으며, 서버의 `.env` 환경변수와 `core/config.py`에서만 안전하게 관리됩니다. 모든 외부 LLM 호출은 백엔드 Service 계층에서 대리 수행합니다.
+
+### 6.3 AI 타임아웃 및 재시도·대체 응답 정책 (Retry Policy)
+*   **타임아웃 설정**: `asyncio.wait_for(..., timeout=settings.ai_timeout_seconds)`를 적용하여 10초 이내에 응답이 도착하지 않을 경우 즉시 코루틴을 취소하고 `AI_TIMEOUT` 예외를 발생시킵니다.
+*   **재시도 전략 (Retry Strategy)**:
+    *   **서버 레벨 (0회 재시도)**: AI 응답 지연 시 서버에서 백엔드 스레드를 점유하며 무리하게 자동 재시도하면 전체 사용자 대기 시간이 급증하므로, 서버에서는 추가 재시도 없이 즉시 대체 응답을 반환합니다.
+    *   **클라이언트 레벨 (수동 재시도)**: 프론트엔드 UI에서 `error_status`를 감지하여 사용자에게 실패 상태를 알리고, 원문 질문을 보존하여 사용자가 원하는 시점에 1회 클릭으로 재시도할 수 있도록 지원합니다.
+*   **대체 응답 정책 (Fallback Response)**:
+    *   타임아웃 시: `"현재 응답이 지연되고 있어요. 잠시 후 다시 시도해 주세요. (error: AI_TIMEOUT)"`
+    *   기타 서버 에러 시: `"AI 서버 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."`
+    *   사용자 질문은 AI 호출 전 **1차 DB 저장(Commit)**되므로, 외부 AI 서버 오류 시에도 사용자 질문 데이터는 영구 보존됩니다.
+
+### 6.4 운영 로그 수집 및 모니터링
+*   **로그 수집 목적 및 활용**:
+    1.  **멀티 유저 요청 추적 (Traceability)**: 고유 난수 `request_id`와 `user_id`를 함께 기록하여 동시 접속 환경에서도 각 요청의 생명주기를 명확히 추적합니다.
+    2.  **성능 모니터링 (Latency)**: API 호출 전후 시간을 측정하여 밀리초 단위 `latency_ms`를 로깅함으로써 응답 지연 구간을 파악합니다.
+    3.  **장애 감지 및 서비스 개선**: `AI_TIMEOUT`, `AI_ERROR` 등의 에러 코드를 분석하여 타임아웃 임계치 조정 및 프롬프트 튜닝에 활용합니다.
+*   **데이터베이스 대화 로그 검증**:
+    ```bash
+    sqlite3 chatbot.db < scripts/check_logs.sql
+    ```
+
+## 7. 팀 구성원 역할 및 개인별 작업 요약 (커밋 시나리오)
 이 프로젝트는 총 4명의 팀원이 협업하여 완성하였으며, 기능 단위의 브랜치 전략(`feature/*`, `refactor/*`)을 활용하여 개발을 진행했습니다. 실제 GitHub 커밋 로그에 기반한 팀원별 **전체 작업 내역**은 다음과 같습니다.
 
 ### 👩‍💻 팀원 1: 초기 설정, 코어(Core) 모듈 및 DB 연동
@@ -238,3 +451,17 @@ nohup npm start &
 ```bash
 sqlite3 chatbot.db < scripts/check_logs.sql
 ```
+
+### 🚀 최근 리팩토링 및 평가 기준 보완 작업 (auth & ai_chat 담당)
+*   **주요 브랜치**: `refactor/backend-repository-pattern`
+*   **역할**: 백엔드 계층화(Router-Service-Repository), DB 접근 코드 분리, 인증 에러 응답 표준화 및 평가 체크리스트 대응.
+*   **작업 내역 (Commit Summary)**:
+    1.  `refactor: 계층형 아키텍처(router-service-repository) 분리 및 DB 접근 코드 이관` (`4006b57`)
+        *   `auth/repository.py` 및 `ai_chat/repository.py`를 신설하여 DB 쿼리/트랜잭션 분리
+        *   `ai_chat/router.py`의 비즈니스 파이프라인을 `service.py`로 이관하여 라우터 책임 최소화
+        *   신규 Repository 단위 테스트 및 API 전체 플로우 통합 테스트 14건 구축
+    2.  `feat: AI 평가 체크리스트 기준 보완 (인증 에러 응답 표준화, .env.example 추가, README 상세화)`
+        *   비로그인 및 인증 실패 시 `401 Unauthorized` 상태 코드 및 `{"detail": "로그인이 필요합니다."}` 메시지 반환 표준화
+        *   루트 디렉토리에 `.env.example` 환경변수 템플릿 파일 추가
+        *   README.md에 아키텍처 다이어그램, ERD, 실패 JSON 예시, 보안/재시도 정책 등 종합 문서화
+
