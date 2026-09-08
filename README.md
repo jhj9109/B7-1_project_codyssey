@@ -278,50 +278,58 @@ npm run dev
 **접속:** 브라우저에서 `http://localhost:3000` 또는 `http://localhost:8000` 접속 시 전체 애플리케이션을 사용할 수 있습니다.
 
 ### AWS 실행 방법 (Ubuntu EC2 기준)
-한 대의 EC2 서버에서 백엔드와 프론트엔드를 모두 띄우는 가이드입니다. Node.js 20.9 이상 버전을 사용합니다.
+한 대의 EC2 서버에서 백엔드(FastAPI)와 프론트엔드(Next.js)를 무중단 운영하기 위해 **프로세스 매니저(PM2)**를 활용합니다. 프로세스 비정상 종료 시 자동 재시작 및 시스템 재부팅 시 자동 복구를 지원합니다.
+
 ```bash
 # 접속 방법
 ssh -i "다운받은키페어이름.pem" ubuntu@복사한퍼블릭IP
-# 예시
-ssh -i "codyssey_keypair.pem" ubuntu@13.124.238.238
+# 예시: ssh -i "codyssey_keypair.pem" ubuntu@13.124.238.238
 
-# 1. 시스템 업데이트 및 필요 패키지(Node.js 포함) 설치
+# 1. 시스템 업데이트 및 필수 패키지(Node.js 20.x, PM2) 설치
 sudo apt update
 sudo apt install python3-pip python3-venv git curl -y
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
+sudo npm install -g pm2          # PM2 글로벌 설치
 
 # 2. 프로젝트 클론 및 폴더 이동
 git clone [본인의 깃허브 레포지토리 주소]
 cd B7-1_project_codyssey
 
-# 3. 백엔드 세팅 및 실행
+# 3. 백엔드 세팅 및 PM2 무중단 실행
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-nano .env  # 백엔드 환경변수(.env) 세팅
-# EC2 배포 시 필수 설정 항목:
-# GEMINI_API_KEY="본인의_API_키"
-# GEMINI_MODEL="gemini-3.5-flash"  (기본값: gemini-3.5-flash, 키 권한에 맞게 설정)
-# SECRET_KEY="안전한_JWT_시크릿키"
-# CORS_ORIGINS="http://[EC2퍼블릭IP]:3000"  (프론트엔드 브라우저 CORS 허용)
-# FRONTEND_URL="http://[EC2퍼블릭IP]:3000"  (루트 접속 시 프론트 리다이렉트)
-nohup uvicorn main:app --host 0.0.0.0 --port 8000 &
+nano .env  # 백엔드 환경변수 세팅 (GEMINI_API_KEY, CORS_ORIGINS 등 입력)
 
-# 4. 프론트엔드 세팅 및 실행
+# [백엔드 PM2 등록] 가상환경의 uvicorn을 "backend" 서비스로 백그라운드 구동
+pm2 start "venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000" --name "backend"
+
+# 4. 프론트엔드 세팅 및 PM2 무중단 실행
 cd frontend
 npm install
 cp .env.example .env.local
-nano .env.local 
-# EC2 배포 시 필수 설정 항목 (브라우저가 EC2 백엔드로 요청을 보내도록 설정):
-# NEXT_PUBLIC_API_BASE_URL=http://[EC2퍼블릭IP]:8000/api
-# NEXT_PUBLIC_SITE_URL=http://[EC2퍼블릭IP]:3000
+nano .env.local  # 프론트 환경변수 세팅 (NEXT_PUBLIC_API_BASE_URL 등 입력)
 npm run build
-nohup npm start &
+
+# [프론트엔드 PM2 등록] Next.js 프로덕션 서버를 "frontend" 서비스로 구동 (포트 3000)
+pm2 start npm --name "frontend" -- start -- -p 3000
+
+# 5. 서버 재부팅 시 자동 재실행 등록 (선택/권장)
+pm2 startup
+pm2 save
 
 # 브라우저에서 http://[EC2퍼블릭IP]:3000 접속
 ```
+
+#### 💡 유용한 PM2 프로세스 관리 명령어
+* `pm2 list`: 실행 중인 백엔드/프론트엔드의 구동 상태, CPU/메모리 점유율, 재시작 횟수 확인
+* `pm2 logs`: 실시간 전체 로그 스트리밍 (FastAPI 로그 및 Next.js 통신 로그 통합 확인)
+* `pm2 logs backend`: 백엔드 에러 및 요청 로그만 집중 확인
+* `pm2 restart all`: 백엔드/프론트엔드 서비스 전체 재시작
+* `pm2 stop all`: 모든 서비스 중지
+
 
 ## 6. 핵심 설계 원칙 및 운영 정책
 
