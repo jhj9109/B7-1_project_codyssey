@@ -87,3 +87,9 @@ def test_unauthenticated_requests():
     assert res3.status_code == 401
     assert res3.json().get("detail") == "로그인이 필요합니다."
 
+def test_root_redirect():
+    # 백엔드 루트 GET / 요청 시 프론트엔드 URL로 리다이렉트 (307 Temporary Redirect)
+    res = client.get("/", follow_redirects=False)
+    assert res.status_code in (307, 302)
+    assert "location" in res.headers
+

@@ -299,7 +299,13 @@ cd B7-1_project_codyssey
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 nano .env  # 백엔드 환경변수(.env) 세팅
+# EC2 배포 시 필수 설정 항목:
+# GEMINI_API_KEY="본인의_API_키"
+# SECRET_KEY="안전한_JWT_시크릿키"
+# CORS_ORIGINS="http://[EC2퍼블릭IP]:3000"  (프론트엔드 브라우저 CORS 허용)
+# FRONTEND_URL="http://[EC2퍼블릭IP]:3000"  (루트 접속 시 프론트 리다이렉트)
 nohup uvicorn main:app --host 0.0.0.0 --port 8000 &
 
 # 4. 프론트엔드 세팅 및 실행
@@ -307,6 +313,9 @@ cd frontend
 npm install
 cp .env.example .env.local
 nano .env.local 
+# EC2 배포 시 필수 설정 항목 (브라우저가 EC2 백엔드로 요청을 보내도록 설정):
+# NEXT_PUBLIC_API_BASE_URL=http://[EC2퍼블릭IP]:8000/api
+# NEXT_PUBLIC_SITE_URL=http://[EC2퍼블릭IP]:3000
 npm run build
 nohup npm start &
 
