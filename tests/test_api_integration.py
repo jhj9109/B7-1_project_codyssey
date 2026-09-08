@@ -48,16 +48,18 @@ def test_full_api_flow():
     access_token = token_data["access_token"]
     auth_headers = {"Authorization": f"Bearer {access_token}"}
 
-    # 3. AI 채팅 전송 (Gemini API 키가 없으므로 더미 응답 반환됨)
-    chat_res = client.post(
-        "/api/chat",
-        headers=auth_headers,
-        json={"message": "안녕하세요!"}
-    )
+    # 3. AI 채팅 전송 (외부 LLM API 호출은 mock 처리하여 네트워크 독립적 검증)
+    from unittest.mock import patch
+    with patch("ai_chat.service.generate_response", return_value="안녕하세요! 테스트 AI 응답입니다."):
+        chat_res = client.post(
+            "/api/chat",
+            headers=auth_headers,
+            json={"message": "안녕하세요!"}
+        )
     assert chat_res.status_code == 200
     chat_data = chat_res.json()
     assert chat_data["user_message"] == "안녕하세요!"
-    assert chat_data["ai_response"] is not None
+    assert chat_data["ai_response"] == "안녕하세요! 테스트 AI 응답입니다."
     assert chat_data["error_status"] is None
 
     # 4. 내 대화 내역 조회

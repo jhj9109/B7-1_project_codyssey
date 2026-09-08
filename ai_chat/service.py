@@ -69,7 +69,7 @@ async def generate_response(prompt: str, context: list = None) -> str:
             # asyncio.to_thread를 통해 동기 함수를 비동기함수처럼 동작시킬 수 있음 (타 워커 스레드에서 동작시킴)
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model='gemini-2.5-flash',
+                model=settings.gemini_model,
                 contents=contents
             )
             return response.text

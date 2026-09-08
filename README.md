@@ -303,6 +303,7 @@ cp .env.example .env
 nano .env  # 백엔드 환경변수(.env) 세팅
 # EC2 배포 시 필수 설정 항목:
 # GEMINI_API_KEY="본인의_API_키"
+# GEMINI_MODEL="gemini-3.5-flash"  (기본값: gemini-3.5-flash, 키 권한에 맞게 설정)
 # SECRET_KEY="안전한_JWT_시크릿키"
 # CORS_ORIGINS="http://[EC2퍼블릭IP]:3000"  (프론트엔드 브라우저 CORS 허용)
 # FRONTEND_URL="http://[EC2퍼블릭IP]:3000"  (루트 접속 시 프론트 리다이렉트)
@@ -337,7 +338,7 @@ nohup npm start &
 *   Google Gemini API Key는 클라이언트 코드(HTML/JS)에 일절 노출되지 않으며, 서버의 `.env` 환경변수와 `core/config.py`에서만 안전하게 관리됩니다. 모든 외부 LLM 호출은 백엔드 Service 계층에서 대리 수행합니다.
 
 ### 6.3 AI 타임아웃 및 재시도·대체 응답 정책 (Retry Policy)
-*   **타임아웃 설정**: `asyncio.wait_for(..., timeout=settings.ai_timeout_seconds)`를 적용하여 10초 이내에 응답이 도착하지 않을 경우 즉시 코루틴을 취소하고 `AI_TIMEOUT` 예외를 발생시킵니다.
+*   **타임아웃 설정**: `asyncio.wait_for(..., timeout=settings.ai_timeout_seconds)`를 적용하여 20초 이내에 응답이 도착하지 않을 경우 즉시 코루틴을 취소하고 `AI_TIMEOUT` 예외를 발생시킵니다.
 *   **재시도 전략 (Retry Strategy)**:
     *   **서버 레벨 (0회 재시도)**: AI 응답 지연 시 서버에서 백엔드 스레드를 점유하며 무리하게 자동 재시도하면 전체 사용자 대기 시간이 급증하므로, 서버에서는 추가 재시도 없이 즉시 대체 응답을 반환합니다.
     *   **클라이언트 레벨 (수동 재시도)**: 프론트엔드 UI에서 `error_status`를 감지하여 사용자에게 실패 상태를 알리고, 원문 질문을 보존하여 사용자가 원하는 시점에 1회 클릭으로 재시도할 수 있도록 지원합니다.

@@ -33,8 +33,7 @@ def create_token(data: dict, type: str, expires_delta: Optional[timedelta] = Non
             expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
         else:
             # Refresh Token은 보통 7일 이상으로 길게 설정
-            refresh_expire_days = getattr(settings, "refresh_token_expire_days", 7)
-            expire = datetime.now(timezone.utc) + timedelta(days=refresh_expire_days)
+            expire = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
 
     # 토큰 만료 시간 추가
     to_encode.update({"exp": expire})
