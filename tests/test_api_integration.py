@@ -43,6 +43,7 @@ def test_full_api_flow():
         json={"username": "flowuser", "password": "password123"}
     )
     assert login_res.status_code == 200
+    assert "refresh_token" in login_res.cookies
     token_data = login_res.json()
     assert "access_token" in token_data
     access_token = token_data["access_token"]

@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 from core import models
 from core.config import settings
@@ -14,82 +16,257 @@ from ai_chat import repository
 # 로거 초기화 (터미널 관련 로그 출력 제어)
 logger = logging.getLogger("chatbot")
 
+import json
+
+def inspect_api_response(response):
+    """
+    API 응답 객체(또는 Dict)를 분석하여 주요 정보들을 보기 좋게 출력합니다.
+    """
+    # 1. 만약 SDK 응답 객체라면 딕셔너리로 변환 시도
+    if not isinstance(response, dict):
+        try:
+            if hasattr(response, 'to_dict'):
+                response_dict = response.to_dict()
+            elif hasattr(response, 'dict'):
+                response_dict = response.dict()
+            else:
+                # 객체의 __dict__ 속성 활용
+                response_dict = vars(response)
+        except Exception:
+            print("⚠️ 응답을 딕셔너리로 변환할 수 없어 원본 객체로 진행합니다.")
+            response_dict = response
+    else:
+        response_dict = response
+
+    print("=" * 60)
+    print("🔍 [AI API Response Inspector] 상세 분석 결과")
+    print("=" * 60)
+
+    # [1] Prompt Feedback 분석 (질문 자체에 대한 필터링 여부)
+    prompt_feedback = response_dict.get("prompt_feedback") or response_dict.get("promptFeedback")
+    if prompt_feedback:
+        print("\n[1] 📝 Prompt Feedback (질문 분석)")
+        block_reason = prompt_feedback.get("block_reason") or prompt_feedback.get("blockReason")
+        if block_reason:
+            print(f"  ❌ 질문이 차단되었습니다! 사유: {block_reason}")
+        else:
+            print("  ✅ 질문 사전 검사 통과 (차단 사유 없음)")
+    else:
+        print("\n[1] 📝 Prompt Feedback: 정보 없음 (정상 통과)")
+
+    # [2] Candidates 분석 (답변 후보)
+    candidates = response_dict.get("candidates", [])
+    print(f"\n[2] 🤖 생성된 답변 후보 (Candidates): 총 {len(candidates)}개")
+
+    for idx, candidate in enumerate(candidates):
+        print(f"\n  👉 Candidate #{idx}")
+        
+        # Finish Reason (종료 원인)
+        finish_reason = candidate.get("finish_reason") or candidate.get("finishReason")
+        print(f"    - 생성 종료 사유 (Finish Reason): {finish_reason}")
+        
+        # Content 및 Text 출력
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        print(f"    - 답변 구성 요소 (Parts): {len(parts)}개")
+        
+        for p_idx, part in enumerate(parts):
+            # 텍스트 형태인지 확인
+            if isinstance(part, dict) and "text" in part:
+                text_content = part["text"]
+            elif hasattr(part, "text"):
+                text_content = part.text
+            else:
+                text_content = str(part)
+                
+            # 너무 길면 앞부분만 요약 출력
+            preview = text_content[:150].replace('\n', ' ') + "..." if len(text_content) > 150 else text_content
+            print(f"      * Part [{p_idx}] 텍스트 예시: \"{preview}\"")
+
+        # Safety Ratings (안전성 검사 결과)
+        safety_ratings = candidate.get("safety_ratings") or candidate.get("safetyRatings", [])
+        if safety_ratings:
+            print("    - 🛡️ 안전성 등급 (Safety Ratings):")
+            for rating in safety_ratings:
+                # SDK 객체이거나 딕셔너리인 경우 모두 대응
+                category = rating.get("category") if isinstance(rating, dict) else getattr(rating, "category", "")
+                probability = rating.get("probability") if isinstance(rating, dict) else getattr(rating, "probability", "")
+                
+                # 유해 등급이 NEGLIGIBLE(무시할 만한 수준)이 아니면 경고 표시
+                warn_flag = "⚠️" if probability not in ["NEGLIGIBLE", "LOW", "HARM_PROBABILITY_NEGLIGIBLE"] else "✅"
+                print(f"      {warn_flag} {category:<30} : {probability}")
+
+    # [3] 토큰 사용량 정보 (Usage Metadata)
+    usage = response_dict.get("usage_metadata") or response_dict.get("usageMetadata")
+    if usage:
+        print("\n[3] 📊 사용된 토큰 정보 (Usage Metadata)")
+        prompt_tokens = usage.get("prompt_token_count") or usage.get("promptTokenCount", 0)
+        candidate_tokens = usage.get("candidates_token_count") or usage.get("candidatesTokenCount", 0)
+        total_tokens = usage.get("total_token_count") or usage.get("totalTokenCount", 0)
+        
+        print(f"  - 입력 토큰 (Prompt): {prompt_tokens} tokens")
+        print(f"  - 출력 토큰 (Candidates): {candidate_tokens} tokens")
+        print(f"  - 전체 토큰 (Total): {total_tokens} tokens")
+
+    print("\n" + "=" * 60)
+
+class AITimeoutError(Exception):
+    """AI API 호출 타임아웃 시 발생하는 예외"""
+    pass
+
 # gemini api를 호출하여 ai 응답을 생성, 반환하는 함수
 # 이전 대화 기록 (context)를 넣어 문맥을 유지함. (최대 과거 채팅 이력 3개까지)
 # 사용자의 최신 질문 (prompt)을 함께 제공 
 # 시간 내 미응답 시 타임아웃 발생시킴 
-async def generate_response(prompt: str, context: list = None) -> str:
+def build_ai_contents(prompt: str, context: Optional[List[models.ChatLog]] = None) -> List[types.Content]:
+    """사용자 프롬프트와 과거 대화 기록을 Google GenAI SDK가 요구하는 포맷으로 변환합니다."""
+    contents = []
+    if context:
+        for log in context:
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=log.user_message)]))
+            if log.ai_response:
+                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=log.ai_response)]))
+    
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
+    return contents
+
+async def generate_response(prompt: str, context: List[models.ChatLog] = None) -> str:
     
     # API 키가 환경 변수에 설정되어 있지 않은 경우 더미 응답 반환
     if not settings.gemini_api_key:
         logger.warning("Gemini API Key is not set. Returning dummy response.")
         return "I am a dummy AI. Please configure GEMINI_API_KEY in your .env file to enable real AI responses."
 
-
-    # 내부 비동기 호출 함수 정의
-    async def _call_api():
-        # gemini api key를 기반으로 gemini client 초기화
-        client = genai.Client(api_key=settings.gemini_api_key)
-        
-        # 모델에 전달할 대화 내역 리스트 구성
-        # genai sdk 자료구조 types에 기반함 
-            # types.contens는 role과 parts로 구분됨
-        # (과거 대화내역, 최신 대화내역 순으로 contents 리스트에 저장)
-        contents = []
-        if context:
-            # DB에서 가져온 최근 대화 기록을 순회하며 역할(role)에 맞춰 추가
-            for log in context:
-                # 사용자의 질문
-                contents.append(
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=log.user_message)]
-                    )
-                )
-                # AI의 응답 (정상적으로 존재할 경우에만)
-                if log.ai_response:
-                    contents.append(
-                        types.Content(
-                            role="model",
-                            parts=[types.Part.from_text(text=log.ai_response)]
-                        )
-                    )
-        
-        # 현재 사용자가 방금 입력한 프롬프트(질문) 추가
-        contents.append(
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prompt)]
-            )
-        )
-
-        try:
-            # I/O 바운드 작업인 외부 API 호출을 스레드풀에서 실행하여 비동기 처리
-            # 기본적으로 generate_content는 동기함수이므로 async, awit 비동기 처리 위한 추가 과정 필요
-            # asyncio.to_thread를 통해 동기 함수를 비동기함수처럼 동작시킬 수 있음 (타 워커 스레드에서 동작시킴)
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=settings.gemini_model,
-                contents=contents
-            )
-            return response.text
-        except Exception as e:
-            logger.error(f"Error calling AI API: {str(e)}")
-            raise e
-
+    # gemini api key를 기반으로 gemini client 초기화
+    client = genai.Client(api_key=settings.gemini_api_key)
+    
+    contents = build_ai_contents(prompt, context)
 
     try:
-        # 비동기 함수(_call_api)를 주어진 제한 시간(timeout) 동안만 대기
-        result = await asyncio.wait_for(_call_api(), timeout=settings.ai_timeout_seconds)
-        return result
+        # client.aio를 사용하여 네이티브 비동기로 API 호출
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=settings.gemini_model,
+                contents=contents
+            ),
+            timeout=settings.ai_timeout_seconds
+        )
+
+        inspect_api_response(response)
+        
+        # 모델의 응답이 안전성(Safety) 필터에 의해 차단되었거나 비어있는 경우 처리
+        if not response.text:
+            raise genai_errors.APIError(message="AI response was blocked or empty.")
+            
+        return response.text
+
     except asyncio.TimeoutError:
         # 제한 시간이 초과된 경우
         logger.error("AI API call timed out")
-        raise Exception("AI_TIMEOUT")
+        raise AITimeoutError("AI_TIMEOUT")
+    except genai_errors.ClientError as e:
+        # 4xx 에러: 잘못된 요청, 인증 실패, 쿼터 초과 등
+        logger.error(f"AI ClientError: {e.message}")
+        raise
+    except genai_errors.ServerError as e:
+        # 5xx 에러: 구글 서버 내부 오류
+        logger.error(f"AI ServerError: {e.message}")
+        raise
+    except genai_errors.APIError as e:
+        # 기타 API 오류
+        logger.error(f"AI APIError: {e.message}")
+        raise
     except Exception as e:
-        # 그 외 API 에러
+        # 그 외 예상치 못한 에러
+        logger.exception("Unexpected error calling AI API")
         raise e
 
+
+def extract_retry_seconds(error: Exception) -> Optional[int]:
+    """
+    API 429 에러 메시지(예: 'Please retry in 24.59911155s.')에서 
+    재시도까지 남은 대기 시간(초)을 추출하여 반올림한 정수로 반환합니다.
+    추출 실패 시 None을 반환합니다.
+    """
+    error_str = str(error)
+    match = re.search(r"retry in (\d+(?:\.\d+)?)s", error_str, re.IGNORECASE)
+    if match:
+        try:
+            return max(1, round(float(match.group(1))))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+# Rate Limit 서킷 브레이커를 위한 글로벌 잠금 해제 시간
+# 이 시간(timestamp) 전까지는 구글 API 호출을 원천 차단하고 Fast-fail 처리합니다.
+GLOBAL_RATE_LIMIT_UNLOCK_TIME = 0.0
+
+# 사용자에게 전달할 에러 안내 메시지 매핑 테이블
+AI_ERROR_MESSAGES = {
+    "AI_TIMEOUT": "현재 응답이 지연되고 있어요. 잠시 후 다시 시도해 주세요.",
+    "AI_RATE_LIMIT": "현재 이용량이 많아 요청 한도를 초과했습니다. 약 1분 뒤에 다시 시도해 주세요.",
+    "AI_AUTH_ERROR": "AI 서비스 인증 오류가 발생했습니다. 관리자에게 문의해 주세요.",
+    "AI_INVALID_REQUEST": "질문 요청 형식이 올바르지 않습니다. 다시 입력해 주세요.",
+    "AI_CLIENT_ERROR": "요청 처리 중 오류가 발생했습니다. 질문을 다시 확인해 주세요.",
+    "AI_SERVER_ERROR": "AI 서버(Google)에 일시적인 장애가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    "AI_API_ERROR": "AI 서비스 통신 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    "AI_ERROR": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+}
+
+
+async def execute_ai_call_with_handling(message: str, context_logs: List[models.ChatLog], request_id: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    AI를 호출하고 서킷 브레이커 및 예외 처리를 수행합니다.
+    반환값: (ai_response_text, error_status)
+    """
+    global GLOBAL_RATE_LIMIT_UNLOCK_TIME
+    
+    # [서킷 브레이커] 현재 시간이 잠금 해제 시간보다 이전이면 
+    # 구글 API 호출을 생략하고 즉시 한도 초과 에러 반환 (Fast-fail)
+    if time.time() < GLOBAL_RATE_LIMIT_UNLOCK_TIME:
+        remaining_sec = int(GLOBAL_RATE_LIMIT_UNLOCK_TIME - time.time())
+        logger.warning(f"circuit_breaker_active request_id={request_id} blocked. Unlocks in {remaining_sec}s")
+        return AI_ERROR_MESSAGES["AI_RATE_LIMIT"], "AI_ERROR"
+
+    start_time = time.time()
+    try:
+        ai_response_text = await generate_response(message, context_logs)
+        latency_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"ai_call_success request_id={request_id} latency_ms={latency_ms}")
+        return ai_response_text, None
+    except AITimeoutError:
+        error_status = "AI_TIMEOUT"
+        logger.error(f"ai_call_failed request_id={request_id} error={error_status}")
+        return AI_ERROR_MESSAGES["AI_TIMEOUT"], error_status
+    except genai_errors.ClientError as e:
+        error_status = "AI_ERROR"
+        if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e).upper():
+            lock_duration = (extract_retry_seconds(e) or 60) + 5
+            GLOBAL_RATE_LIMIT_UNLOCK_TIME = time.time() + lock_duration
+            logger.error(f"ai_call_failed request_id={request_id} error={error_status} msg=RateLimit, circuit_breaker locked for {int(lock_duration)}s")
+            return AI_ERROR_MESSAGES["AI_RATE_LIMIT"], error_status
+        elif getattr(e, "code", None) in (401, 403):
+            logger.error(f"ai_call_failed request_id={request_id} error={error_status} msg=AuthError")
+            return AI_ERROR_MESSAGES["AI_AUTH_ERROR"], error_status
+        elif getattr(e, "code", None) == 400:
+            logger.error(f"ai_call_failed request_id={request_id} error={error_status} msg=InvalidRequest")
+            return AI_ERROR_MESSAGES["AI_INVALID_REQUEST"], error_status
+        else:
+            logger.error(f"ai_call_failed request_id={request_id} error={error_status} code={getattr(e, 'code', None)} details={getattr(e, 'message', str(e))}")
+            return AI_ERROR_MESSAGES["AI_CLIENT_ERROR"], error_status
+    except genai_errors.ServerError as e:
+        error_status = "AI_ERROR"
+        logger.error(f"ai_call_failed request_id={request_id} error={error_status} details={getattr(e, 'message', str(e))}")
+        return AI_ERROR_MESSAGES["AI_SERVER_ERROR"], error_status
+    except genai_errors.APIError as e:
+        error_status = "AI_ERROR"
+        logger.error(f"ai_call_failed request_id={request_id} error={error_status} details={getattr(e, 'message', str(e))}")
+        return AI_ERROR_MESSAGES["AI_API_ERROR"], error_status
+    except Exception as e:
+        error_status = "AI_ERROR"
+        logger.exception(f"ai_call_failed request_id={request_id} error={error_status}")
+        return AI_ERROR_MESSAGES["AI_ERROR"], error_status
 
 async def process_chat(db: Session, user_id: int, message: str) -> models.ChatLog:
     """
@@ -113,26 +290,11 @@ async def process_chat(db: Session, user_id: int, message: str) -> models.ChatLo
     new_chat = repository.create_chat_log(db, user_id=user_id, user_message=message)
 
     logger.info(f"ai_call_start user_id={user_id} request_id={request_id}")
-    start_time = time.time()
 
-    ai_response_text = None
-    error_status = None
+    # 2. AI 호출 및 예외 처리 위임
+    ai_response_text, error_status = await execute_ai_call_with_handling(message, context_logs, request_id)
 
-    try:
-        ai_response_text = await generate_response(message, context_logs)
-        latency_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"ai_call_success request_id={request_id} latency_ms={latency_ms}")
-    except Exception as e:
-        error_msg = str(e)
-        if error_msg == "AI_TIMEOUT":
-            error_status = "AI_TIMEOUT"
-            ai_response_text = "현재 응답이 지연되고 있어요. 잠시 후 다시 시도해 주세요. (error: AI_TIMEOUT)"
-        else:
-            error_status = "AI_ERROR"
-            ai_response_text = "AI 서버 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-        logger.error(f"ai_call_failed request_id={request_id} error={error_status}")
-
-    # 2차 업데이트: AI 응답 또는 에러 안내문을 DB에 업데이트
+    # 2차 업데이트: AI 응답 또는 에러 상태를 DB에 업데이트
     updated_chat = repository.update_chat_response(
         db=db,
         chat_log=new_chat,
@@ -151,4 +313,3 @@ async def process_chat(db: Session, user_id: int, message: str) -> models.ChatLo
 def get_chat_history(db: Session, user_id: int) -> List[models.ChatLog]:
     """사용자의 전체 과거 대화 기록을 시간순(오름차순)으로 조회합니다."""
     return repository.get_all_chats_by_user_id(db, user_id=user_id)
-

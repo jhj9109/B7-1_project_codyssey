@@ -22,18 +22,32 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
+def get_access_token_expire_seconds() -> int:
+    """Access Token의 유효기간(초)을 반환합니다. (설정값이 0 이하인 경우 기본 60분 적용)"""
+    minutes = settings.access_token_expire_minutes if settings.access_token_expire_minutes > 0 else 60
+    return minutes * 60
+
+def get_refresh_token_expire_seconds() -> int:
+    """Refresh Token의 유효기간(초)을 반환합니다. (JWT exp와 브라우저 쿠키 max_age가 공유하는 단일 기준)"""
+    days = settings.refresh_token_expire_days if settings.refresh_token_expire_days > 0 else 7
+    return days * 24 * 60 * 60
+
 def create_token(data: dict, type: str, expires_delta: Optional[timedelta] = None) -> str:
     """주어진 데이터(페이로드)를 바탕으로 JWT 토큰을 생성합니다."""
     to_encode = data.copy()
-    to_encode.update({"type": type})
+    now = datetime.now(timezone.utc)
+    to_encode.update({
+        "type": type,
+        "iat": now,  # 토큰 발급 일시 (Issued At)
+    })
+
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = now + expires_delta
     else:
         if type == "access":
-            expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
+            expire = now + timedelta(seconds=get_access_token_expire_seconds())
         else:
-            # Refresh Token은 보통 7일 이상으로 길게 설정
-            expire = datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+            expire = now + timedelta(seconds=get_refresh_token_expire_seconds())
 
     # 토큰 만료 시간 추가
     to_encode.update({"exp": expire})

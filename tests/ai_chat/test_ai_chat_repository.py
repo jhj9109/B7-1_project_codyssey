@@ -52,12 +52,13 @@ def test_chat_repository_lifecycle(db_session):
     log4 = repository.create_chat_log(db=session, user_id=user.id, user_message="네 번째 질문")
     repository.update_chat_response(db=session, chat_log=log4, ai_response="오류 발생", error_status="AI_TIMEOUT")
 
-    # 4. get_recent_chats_by_user_id (최신순 limit=3)
+    # 4. get_recent_chats_by_user_id (에러가 제외된 정상 대화만 최신순 limit=3)
     recent_chats = repository.get_recent_chats_by_user_id(db=session, user_id=user.id, limit=3)
     assert len(recent_chats) == 3
-    assert recent_chats[0].id == log4.id
-    assert recent_chats[1].id == log3.id
-    assert recent_chats[2].id == log2.id
+    # log4는 error_status가 있으므로 AI 컨텍스트용 최근 대화에서 제외됨
+    assert recent_chats[0].id == log3.id
+    assert recent_chats[1].id == log2.id
+    assert recent_chats[2].id == log1.id
 
     # 5. get_all_chats_by_user_id (전체 시간순)
     all_chats = repository.get_all_chats_by_user_id(db=session, user_id=user.id)

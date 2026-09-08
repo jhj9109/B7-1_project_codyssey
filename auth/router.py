@@ -1,7 +1,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, status, Response, Cookie, HTTPException
-from auth import service, validators
+from auth import service, validators, security
 from auth.dependencies import get_db
 from core import schemas
 
@@ -34,14 +34,14 @@ def login_for_access_token(
         db=db
     )
     
-    # 🍪 Refresh Token을 HttpOnly 쿠키로 굽기
+    # 🍪 Refresh Token을 HttpOnly 쿠키로 굽기 (JWT exp와 100% 동일한 TTL 공유)
     response.set_cookie(
         key="refresh_token",
         value=tokens.refresh_token,
         httponly=True,        # XSS 공격 방지 (JS 접근 불가)
         secure=False,         # 로컬(http) 개발 시 False, 배포(https) 시 True
         samesite="lax",       # CSRF 보호 설정
-        max_age=7 * 24 * 60 * 60, # 만료 시간 (예: 7일)
+        max_age=security.get_refresh_token_expire_seconds(),
     )
     
     return tokens
@@ -65,14 +65,14 @@ def refresh_access_token(
     # 새로운 토큰 생성 (Refresh Token Rotation)
     new_tokens = service.reissue_tokens(refresh_token=refresh_token, db=db)
     
-    # 🍪 새로 발급된 Refresh Token으로 쿠키 갱신
+    # 🍪 새로 발급된 Refresh Token으로 쿠키 갱신 (JWT exp와 100% 동일한 TTL 공유)
     response.set_cookie(
         key="refresh_token",
         value=new_tokens.refresh_token,
         httponly=True,
         secure=False,
         samesite="lax",
-        max_age=7 * 24 * 60 * 60,
+        max_age=security.get_refresh_token_expire_seconds(),
     )
     
     return new_tokens

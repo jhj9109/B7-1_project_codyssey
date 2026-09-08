@@ -6,7 +6,10 @@ def get_recent_chats_by_user_id(db: Session, user_id: int, limit: int = 3) -> Li
     """사용자의 최근 대화 기록을 최신순(내림차순)으로 조회합니다."""
     return (
         db.query(models.ChatLog)
-        .filter(models.ChatLog.user_id == user_id)
+        .filter(
+            models.ChatLog.user_id == user_id,
+            models.ChatLog.error_status.is_(None)  # 👈 에러 난 대화는 AI 기억에서 100% 필터링!
+        )
         .order_by(models.ChatLog.id.desc())
         .limit(limit)
         .all()
