@@ -19,21 +19,24 @@
 
 ---
 
-## 2. 메인 채팅 파이프라인 (`ai_chat/router.py - chat`)
+## 2. 메인 채팅 파이프라인 (`Router ➡️ Service ➡️ Repository`)
 
-- 사용자가 화면에서 전송 버튼을 눌렀을 때 실행되는 백엔드 함수
-- generate_response를 호출하여 답변을 받는다. 
-- **인증 ➡️ 조회 ➡️ 1차 저장 ➡️ AI 호출 ➡️ 2차 저장**의 파이프라인으로 구성.
+- 사용자가 화면에서 전송 버튼을 눌렀을 때 `router.py`(`chat`)가 요청을 받아 `service.py`(`process_chat`) 및 `repository.py`로 이어지는 파이프라인을 실행합니다.
+- **인증(Router) ➡️ 조회(Repository) ➡️ 1차 저장(Repository) ➡️ AI 호출(Service) ➡️ 2차 저장(Repository)**의 계층형 파이프라인으로 구성.
 
 ### 세부 동작 단계
-1. **인증 및 요청 추적**: `Depends(get_current_user)`가 작동하여 JWT 토큰이 유효한지 검사하고 유저 정보를 획득합니다.
-    - 동시에 요청 추적용 고유 난수(`request_id`)를 발급합니다.
-2. **과거 대화 기억 가져오기**: DB에서 해당 유저의 가장 최근 채팅 기록 3개를 가져옵니다. 
-    - 이때 내림차순(최신순)으로 뽑아온 데이터를 AI가 순서대로 읽을 수 있게 `reverse()`로 뒤집습니다.
-3. **유저 질문 1차 DB 저장**: AI를 호출하기 **전**에 사용자가 친 채팅을 먼저 DB에 영구 저장(`commit`)합니다. 
+1. **인증 및 요청 수신 (Router)**: `Depends(get_current_user)`가 작동하여 JWT 토큰이 유효한지 검사하고 유저 정보를 획득한 뒤 Service 계층에 위임합니다.
+2. **요청 추적 및 과거 대화 기억 조회 (Service ➡️ Repository)**:
+    - 요청 추적용 고유 난수(`request_id`)를 발급합니다.
+    - `repository.get_recent_chats_by_user_id`를 호출하여 DB에서 해당 유저의 최근 채팅 기록 3개를 내림차순(최신순)으로 가져옵니다. 
+    - AI가 순서대로 읽을 수 있게 `reverse()`로 뒤집습니다.
+3. **유저 질문 1차 DB 저장 (Service ➡️ Repository)**:
+    - AI를 호출하기 **전**에 `repository.create_chat_log`를 통해 사용자가 친 채팅을 먼저 DB에 영구 저장(`commit`)합니다. 
     - 만약 이후 AI 통신 과정에서 구글 서버가 오류를 내더라도 사용자의 질문 데이터는 손실되지 않습니다.
-4. **AI 호출 및 예외(에러) 처리**: `generate_response()`를 호출하여 답변을 대기합니다. 
+4. **AI 호출 및 예외(에러) 처리 (Service)**:
+    - `generate_response()`를 호출하여 답변을 대기합니다. 
     - 만약 타임아웃이나 서버 에러 등 예외(`Exception`)가 발생하면 시스템이 죽지 않고 `except` 블록으로 빠져나와, 
     - 화면에 뿌려줄 **사용자 친화적 한국어 안내 메시지**와 에러 상태 코드(`error_status`)를 대신 생성합니다.
-5. **AI 답변 최종 DB 업데이트**: 3단계에서 만들어둔 레코드의 빈칸에 AI 응답(또는 에러 안내문)을 채워 넣고 
-    - 최종 `commit` 한 뒤 프론트엔드로 응답을 넘겨줍니다.
+5. **AI 답변 최종 DB 업데이트 (Service ➡️ Repository)**:
+    - 3단계에서 만들어둔 레코드에 AI 응답(또는 에러 안내문)을 채워 넣고 `repository.update_chat_response`를 통해 최종 `commit` 한 뒤 프론트엔드로 응답을 넘겨줍니다.
+

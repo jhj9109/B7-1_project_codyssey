@@ -33,8 +33,9 @@ def test_user_response_schema():
 
 
 def test_token_schema():
-    token = Token(access_token="eyJ...", token_type="bearer")
+    token = Token(access_token="eyJ...", refresh_token="eyJ...", token_type="bearer")
     assert token.token_type == "bearer"
+    assert token.refresh_token == "eyJ..."
 
 
 def test_token_data_schema():

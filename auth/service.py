@@ -1,31 +1,29 @@
 from fastapi import HTTPException, status
-from auth import security
-from core import models, schemas
+from sqlalchemy.orm import Session
+from auth import repository, security
+from core import schemas
 
-def create_user(user: schemas.UserCreate, db) -> schemas.UserResponse:
+def create_user(user: schemas.UserCreate, db: Session) -> schemas.UserResponse:
     """
     회원가입 비즈니스 로직:
     아이디 중복을 검사하고, 비밀번호를 해싱한 뒤 DB에 유저를 생성합니다.
     """
-    db_user = db.query(models.User).filter(models.User.username == user.username).first()
+    db_user = repository.get_user_by_username(db, username=user.username)
     if db_user:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already registered")
 
     # 비밀번호 안전하게 암호화
     hashed_password = security.get_password_hash(user.password)
 
-    new_user = models.User(username=user.username, hashed_password=hashed_password)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    new_user = repository.create_user(db, username=user.username, hashed_password=hashed_password)
     return new_user
 
-def authenticate_user(username: str, password: str, db) -> schemas.Token:
+def authenticate_user(username: str, password: str, db: Session) -> schemas.Token:
     """
     로그인 비즈니스 로직:
     유저 존재 여부와 비밀번호를 검증하고, 성공 시 JWT 토큰을 발급합니다.
     """
-    user = db.query(models.User).filter(models.User.username == username).first()
+    user = repository.get_user_by_username(db, username=username)
     if not user or not security.verify_password(password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -44,7 +42,7 @@ def authenticate_user(username: str, password: str, db) -> schemas.Token:
         token_type="bearer"
     )
 
-def reissue_tokens(refresh_token: str, db) -> schemas.Token:
+def reissue_tokens(refresh_token: str, db: Session) -> schemas.Token:
     """
     토큰 재발급 비즈니스 로직:
     Refresh Token을 검증하고 새로운 Access Token (및 Refresh Token)을 반환합니다.
@@ -53,7 +51,7 @@ def reissue_tokens(refresh_token: str, db) -> schemas.Token:
     username = security.verify_refresh_token(refresh_token)
 
     # 2. 유저 존재 여부 확인
-    user = db.query(models.User).filter(models.User.username == username).first()
+    user = repository.get_user_by_username(db, username=username)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

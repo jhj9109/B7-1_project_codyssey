@@ -1,8 +1,15 @@
 import asyncio
 import logging
+import os
+import time
+from typing import List, Optional
+from sqlalchemy.orm import Session
 from google import genai
 from google.genai import types
+
+from core import models
 from core.config import settings
+from ai_chat import repository
 
 # 로거 초기화 (터미널 관련 로그 출력 제어)
 logger = logging.getLogger("chatbot")
@@ -82,3 +89,66 @@ async def generate_response(prompt: str, context: list = None) -> str:
     except Exception as e:
         # 그 외 API 에러
         raise e
+
+
+async def process_chat(db: Session, user_id: int, message: str) -> models.ChatLog:
+    """
+    채팅 처리 메인 비즈니스 파이프라인:
+    1. 고유 request_id 생성 및 로깅
+    2. 최근 3개 대화 기록 조회 및 순서 정렬
+    3. 사용자 질문 1차 DB 선저장
+    4. AI 응답 생성 및 예외 처리
+    5. AI 응답 및 에러 상태 2차 DB 업데이트
+    """
+    # 요청 추적용 고유 난수 생성 (4 바이트 -> 8자리 16진수)
+    request_id = os.urandom(4).hex()
+    logger.info(f"request_received user_id={user_id} path=/api/chat")
+
+    # DB에서 사용자의 최근 채팅 기록 3개 조회 (내림차순, 즉 최신순)
+    context_logs = repository.get_recent_chats_by_user_id(db, user_id=user_id, limit=3)
+    # AI가 시간순으로 읽을 수 있도록 뒤집음
+    context_logs.reverse()
+
+    # 1차 저장: AI 호출 전 사용자의 질문을 DB에 먼저 영구 저장
+    new_chat = repository.create_chat_log(db, user_id=user_id, user_message=message)
+
+    logger.info(f"ai_call_start user_id={user_id} request_id={request_id}")
+    start_time = time.time()
+
+    ai_response_text = None
+    error_status = None
+
+    try:
+        ai_response_text = await generate_response(message, context_logs)
+        latency_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"ai_call_success request_id={request_id} latency_ms={latency_ms}")
+    except Exception as e:
+        error_msg = str(e)
+        if error_msg == "AI_TIMEOUT":
+            error_status = "AI_TIMEOUT"
+            ai_response_text = "현재 응답이 지연되고 있어요. 잠시 후 다시 시도해 주세요. (error: AI_TIMEOUT)"
+        else:
+            error_status = "AI_ERROR"
+            ai_response_text = "AI 서버 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        logger.error(f"ai_call_failed request_id={request_id} error={error_status}")
+
+    # 2차 업데이트: AI 응답 또는 에러 안내문을 DB에 업데이트
+    updated_chat = repository.update_chat_response(
+        db=db,
+        chat_log=new_chat,
+        ai_response=ai_response_text,
+        error_status=error_status
+    )
+
+    if error_status:
+        logger.info(f"db_save_failure user_id={user_id} chat_id={updated_chat.id} error={error_status}")
+    else:
+        logger.info(f"db_save_success user_id={user_id} chat_id={updated_chat.id}")
+
+    return updated_chat
+
+
+def get_chat_history(db: Session, user_id: int) -> List[models.ChatLog]:
+    """사용자의 전체 과거 대화 기록을 시간순(오름차순)으로 조회합니다."""
+    return repository.get_all_chats_by_user_id(db, user_id=user_id)
+

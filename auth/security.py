@@ -6,7 +6,8 @@ from jose import JWTError, jwt
 import bcrypt
 
 from auth.dependencies import get_db
-from core import models, schemas
+from auth import repository
+from core import schemas
 from core.config import settings
 
 def get_password_hash(password: str) -> str:
@@ -110,7 +111,7 @@ def get_current_user(
     except JWTError:
         raise credentials_exception
 
-    user = db.query(models.User).filter(models.User.username == token_data.username).first()
+    user = repository.get_user_by_username(db, username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
