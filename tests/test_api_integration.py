@@ -70,3 +70,20 @@ def test_full_api_flow():
     # 5. 로그아웃
     logout_res = client.post("/api/auth/logout")
     assert logout_res.status_code == 200
+
+def test_unauthenticated_requests():
+    # 1. 토큰 없이 채팅 API 요청 시 401 반환 및 '로그인이 필요합니다.' 메시지 확인
+    res1 = client.post("/api/chat", json={"message": "인증 없는 질문"})
+    assert res1.status_code == 401
+    assert res1.json().get("detail") == "로그인이 필요합니다."
+
+    # 2. 토큰 없이 대화 내역 조회 시 401 반환 및 '로그인이 필요합니다.' 메시지 확인
+    res2 = client.get("/api/me/chats")
+    assert res2.status_code == 401
+    assert res2.json().get("detail") == "로그인이 필요합니다."
+
+    # 3. 위조/만료된 토큰으로 요청 시 401 반환 및 '로그인이 필요합니다.' 메시지 확인
+    res3 = client.get("/api/me/chats", headers={"Authorization": "Bearer invalid_token_12345"})
+    assert res3.status_code == 401
+    assert res3.json().get("detail") == "로그인이 필요합니다."
+

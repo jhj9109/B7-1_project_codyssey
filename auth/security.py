@@ -78,22 +78,25 @@ def verify_refresh_token(token: str) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-# FastAPI의 보안 의존성 처리 객체 (토큰을 얻는 엔드포인트 URL 지정)
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
-security_scheme = HTTPBearer()
+# FastAPI의 보안 의존성 처리 객체 (토큰이 없어도 403 대신 401 에러를 직접 반환할 수 있도록 auto_error=False 적용)
+security_scheme = HTTPBearer(auto_error=False)
 
 def get_current_user(
-        auth: HTTPAuthorizationCredentials = Depends(security_scheme),
+        auth: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
         db = Depends(get_db)):
     """
     클라이언트가 보낸 JWT 토큰을 검증하고, 유효한 경우 현재 로그인된 사용자 객체를 반환합니다.
+    토큰이 없거나 유효하지 않은 경우 401 상태 코드와 '로그인이 필요합니다.' 메시지를 반환합니다.
     """
-    token = auth.credentials
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="로그인이 필요합니다.",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if auth is None or not auth.credentials:
+        raise credentials_exception
+
+    token = auth.credentials
     try:
         # 토큰 디코딩 및 검증
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
@@ -115,3 +118,4 @@ def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
