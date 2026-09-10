@@ -6,7 +6,8 @@ from jose import JWTError, jwt
 import bcrypt
 
 from auth.dependencies import get_db
-from core import models, schemas
+from auth import repository
+from core import schemas
 from core.config import settings
 
 def get_password_hash(password: str) -> str:
@@ -21,19 +22,32 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
+def get_access_token_expire_seconds() -> int:
+    """Access Token의 유효기간(초)을 반환합니다. (설정값이 0 이하인 경우 기본 60분 적용)"""
+    minutes = settings.access_token_expire_minutes if settings.access_token_expire_minutes > 0 else 60
+    return minutes * 60
+
+def get_refresh_token_expire_seconds() -> int:
+    """Refresh Token의 유효기간(초)을 반환합니다. (JWT exp와 브라우저 쿠키 max_age가 공유하는 단일 기준)"""
+    days = settings.refresh_token_expire_days if settings.refresh_token_expire_days > 0 else 7
+    return days * 24 * 60 * 60
+
 def create_token(data: dict, type: str, expires_delta: Optional[timedelta] = None) -> str:
     """주어진 데이터(페이로드)를 바탕으로 JWT 토큰을 생성합니다."""
     to_encode = data.copy()
-    to_encode.update({"type": type})
+    now = datetime.now(timezone.utc)
+    to_encode.update({
+        "type": type,
+        "iat": now,  # 토큰 발급 일시 (Issued At)
+    })
+
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = now + expires_delta
     else:
         if type == "access":
-            expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
+            expire = now + timedelta(seconds=get_access_token_expire_seconds())
         else:
-            # Refresh Token은 보통 7일 이상으로 길게 설정
-            refresh_expire_days = getattr(settings, "refresh_token_expire_days", 7)
-            expire = datetime.now(timezone.utc) + timedelta(days=refresh_expire_days)
+            expire = now + timedelta(seconds=get_refresh_token_expire_seconds())
 
     # 토큰 만료 시간 추가
     to_encode.update({"exp": expire})
@@ -77,22 +91,25 @@ def verify_refresh_token(token: str) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-# FastAPI의 보안 의존성 처리 객체 (토큰을 얻는 엔드포인트 URL 지정)
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
-security_scheme = HTTPBearer()
+# FastAPI의 보안 의존성 처리 객체 (토큰이 없어도 403 대신 401 에러를 직접 반환할 수 있도록 auto_error=False 적용)
+security_scheme = HTTPBearer(auto_error=False)
 
 def get_current_user(
-        auth: HTTPAuthorizationCredentials = Depends(security_scheme),
+        auth: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
         db = Depends(get_db)):
     """
     클라이언트가 보낸 JWT 토큰을 검증하고, 유효한 경우 현재 로그인된 사용자 객체를 반환합니다.
+    토큰이 없거나 유효하지 않은 경우 401 상태 코드와 '로그인이 필요합니다.' 메시지를 반환합니다.
     """
-    token = auth.credentials
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="로그인이 필요합니다.",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    if auth is None or not auth.credentials:
+        raise credentials_exception
+
+    token = auth.credentials
     try:
         # 토큰 디코딩 및 검증
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
@@ -110,7 +127,8 @@ def get_current_user(
     except JWTError:
         raise credentials_exception
 
-    user = db.query(models.User).filter(models.User.username == token_data.username).first()
+    user = repository.get_user_by_username(db, username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
+

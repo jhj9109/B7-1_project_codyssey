@@ -8,16 +8,24 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./chatbot.db"
     # Gemini AI API 키
     gemini_api_key: str = ""
+    # Gemini AI 모델명 (API 키 권한에 맞춰 설정 가능, 기본값: gemini-3.5-flash)
+    gemini_model: str = "gemini-3.5-flash"
     # JWT 서명에 사용할 시크릿 키
     secret_key: str = ""
     # JWT 암호화 알고리즘
     algorithm: str = ""
     # 토큰 만료 시간 (분)
     access_token_expire_minutes: int = 0
+    # 리프레시 토큰 만료 시간 (일)
+    refresh_token_expire_days: int = 7
     # AI 응답 대기 시간 (초) - 타임아웃 처리에 사용
-    ai_timeout_seconds: int = 10
+    ai_timeout_seconds: int = 20
+    # CORS 허용 오리진 (쉼표로 구분하여 추가 오리진 등록 가능, 예: "http://<EC2_IP>:3000")
+    cors_origins: str = ""
+    # 프론트엔드 URL (루트 엔드포인트 리다이렉트 시 사용)
+    frontend_url: str = "http://localhost:3000"
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # 설정 인스턴스 생성 (앱 전체에서 공유)
 # TDD 기반으로 환경 설정 구성 완료
