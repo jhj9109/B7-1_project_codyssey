@@ -66,3 +66,8 @@ INFO  db_save_success user_id=2 chat_id=9
     * `db_save_success`: AI가 준 답변을 기존 레코드에 업데이트하고 DB에 최종 `commit` 성공함 (chat_id 7, 8, 9).
 5. **프론트엔드로 결과 반환**
     * `INFO: 121.135.181.35... "POST /api/chat HTTP/1.1" 200 OK`: FastAPI 프레임워크가 접속한 클라이언트에게 HTTP 200 상태 코드로 응답을 되돌려줌.
+
+### 💡 (참고) 에러 및 서킷 브레이커 차단 로그
+네트워크 지연이나 한도 초과(429) 시에는 아래와 같은 로그가 남아 장애 원인을 즉시 파악할 수 있습니다.
+* `ai_call_failed request_id=... error=AI_TIMEOUT`: 설정한 시간을 초과하여 응답을 받지 못함.
+* `circuit_breaker_active request_id=... blocked. Unlocks in 34s`: 구글 API 429 에러로 인해 잠금이 걸려 백엔드 내부에서 네트워크 통신을 차단(Fast-fail)했음을 의미.

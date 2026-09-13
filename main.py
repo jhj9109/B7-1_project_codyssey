@@ -19,9 +19,15 @@ logger = logging.getLogger("chatbot")
 app = FastAPI(title=settings.app_name)
 
 # Next.js 프론트엔드 연동을 위한 CORS 설정
+# 로컬 개발 기본 오리진 및 환경 변수로 추가된 오리진 병합
+allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+if settings.cors_origins:
+    extra_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+    allowed_origins.extend(extra_origins)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,4 +40,4 @@ app.include_router(chat_router)
 @app.get("/")
 def read_root():
     """백엔드 루트 접속 시 Next.js 프론트엔드 서버로 리다이렉트합니다."""
-    return RedirectResponse(url="http://localhost:3000")
+    return RedirectResponse(url=settings.frontend_url)
